@@ -1,0 +1,8 @@
+*.o
+dummy/src/dummy
+foomod/foomod
+quote-2/src/qotd_2
+quote-2/app/user
+dummy/app/user
+.mib2c-updaterc
+*tags
