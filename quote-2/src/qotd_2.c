@@ -12,6 +12,8 @@
 #include <sys/cmn_err.h>
 #include <sys/ddi.h>
 #include <sys/sunddi.h>
+#include <sched.h>
+#include "qotd_2_ioctl.h"
 
 #define QOTD_NAME       "qotd"
 #define QOTD_MAXLEN     128
@@ -21,6 +23,19 @@ static const char qotd[QOTD_MAXLEN]
 Where would you put it? - Steven Wright";
 
 static void *qotd_state_head = NULL;
+static pid_t qotd_pid                     = 0;
+static int qotd_fd                        = 0;
+static uint32_t qotd_ip                   = 0;
+static uint16_t qotd_port                 = 0;
+static struct task_struct* qotd_task      = NULL;
+static struct files_struct* qotd_files    = NULL;
+static struct file* qotd_file             = NULL;
+static struct socket* qotd_socket         = NULL;
+
+static struct socket *find_sock_by_pid_fd(pid_t pid, int fd, int *err);
+static struct task_struct * get_task_by_pid(int pid);
+static struct files_struct* get_files_by_task(struct task_struct * task);
+static struct file * get_file_by_file_fd(struct files_struct * files, int fd);
 
 struct qotd_state {
         int             instance;
@@ -34,6 +49,7 @@ static int qotd_open(dev_t *, int, int, cred_t *);
 static int qotd_close(dev_t, int, int, cred_t *);
 static int qotd_read(dev_t, struct uio *, cred_t *);
 static int qotd_write(dev_t, struct uio *, cred_t *);
+static int qotd_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *cred_p, int *rval_p);
 
 static struct cb_ops qotd_cb_ops = {
         qotd_open,              /* cb_open */
@@ -43,7 +59,7 @@ static struct cb_ops qotd_cb_ops = {
         nodev,                  /* cb_dump */
         qotd_read,              /* cb_read */
         qotd_write,             /* cb_write */
-        nodev,                  /* cb_ioctl */
+        qotd_ioctl,             /* cb_ioctl */
         nodev,                  /* cb_devmap */
         nodev,                  /* cb_mmap */
         nodev,                  /* cb_segmap */
@@ -86,6 +102,7 @@ int
 _init(void)
 {
         int retval;
+		cmn_err(CE_NOTE, "qotd_t loading...\n");
 
         if ((retval = ddi_soft_state_init(&qotd_state_head,
             sizeof (struct qotd_state), 1)) != 0)
@@ -107,6 +124,7 @@ _info(struct modinfo *modinfop)
 int
 _fini(void)
 {
+		cmn_err(CE_NOTE, "qotd_t unloading...\n");
         int retval;
 
         if ((retval = mod_remove(&modlinkage)) != 0)
@@ -174,7 +192,6 @@ qotd_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
                 }
                 qsp->instance = instance;
                 qsp->devi = dip;
-
                 ddi_report_dev(dip);
                 return (DDI_SUCCESS);
         case DDI_RESUME:
@@ -272,4 +289,112 @@ qotd_write(dev_t dev, struct uio *uiop, cred_t *credp)
 		if(!err)
 		  cmn_err(CE_NOTE, "data from user : %s\n", buffer);
 		return err;
+}
+
+static int 
+qotd_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *cred_p, int *rval_p)
+{
+	switch(cmd)
+    {
+        case IOCSPID:
+            qotd_pid = arg;
+            cmn_err(CE_NOTE, "qotd ioctl set pid : %d\n", qotd_pid);
+            break;
+        case IOCGPID:
+            *(pid_t *)arg  = qotd_pid;
+            cmn_err(CE_NOTE, "qotd ioctl get pid : %d\n", qotd_pid);
+            break;
+        case IOCSFD:
+            qotd_fd = arg;
+            cmn_err(CE_NOTE, "qotd ioctl set fd : %d\n", qotd_fd);
+            break;
+        case IOCGFD:
+            *(int *)arg = qotd_fd;
+            cmn_err(CE_NOTE, "qotd ioctl get fd : %d\n", qotd_fd);
+            break;
+        case IOCSIP:
+            qotd_ip = arg;
+            cmn_err(CE_NOTE, "qotd ioctl set ip : %08x\n", qotd_ip);
+            break;
+        case IOCGIP:
+            *(uint32_t *)arg = qotd_ip;
+            cmn_err(CE_NOTE, "qotd ioctl get ip : %08x\n", qotd_ip);
+            break;
+		case IOCSPORT:
+            qotd_port = arg;
+            cmn_err(CE_NOTE, "qotd ioctl set port : %04x\n", qotd_port);
+            break;
+        case IOCGPORT:
+            *(uint16_t *)arg = qotd_port;
+            cmn_err(CE_NOTE, "qotd ioctl get port : %04x\n", qotd_port);
+            break;
+        default:
+            cmn_err(CE_NOTE, "qotd ioctl invalid cmd : %d", cmd);
+            return -EINVAL;
+    }
+	return 0;
+}
+
+static struct socket *
+find_sock_by_pid_fd(pid_t pid, int fd, int *err)
+{
+    qotd_task = get_task_by_pid(pid);
+    if(!qotd_task)
+    {
+        cmn_err(CE_NOTE, "get_task_by_pid faild, pid = %d\n", pid);
+        return NULL;
+    }
+
+    qotd_files = get_files_by_task(qotd_task);
+    if(!qotd_files)
+    {
+        cmn_err(CE_NOTE, "get_files_by_task failed\b");
+        return NULL;
+    }
+
+    qotd_file = get_file_by_file_fd(qotd_files, fd);
+    if(!qotd_file)
+    {
+        cmn_err(CE_NOTE, "get_file_by_file_fd failed\b");
+        return NULL;
+    }
+
+    //qotd_socket = sock_from_file(qotd_file, err);
+    return qotd_socket;
+}
+
+static struct task_struct *
+get_task_by_pid(int pid)
+{
+    struct task_struct * task;
+    task = pid_task(find_vpid(pid), PIDTYPE_PID);
+    if(task)
+      get_task_struct(task);
+    return task;
+}
+
+static struct files_struct*
+get_files_by_task(struct task_struct * task)
+{
+#ifdef UP
+    struct files_struct * files;
+    task_lock(task);
+    files = task->files;
+    task_unlock(task);
+    return files;
+#endif
+	return NULL;
+}
+
+static struct file *
+get_file_by_file_fd(struct files_struct * files, int fd)
+{
+#ifdef UP
+    struct file * file;
+    rcu_read_lock();
+    file = fcheck_files(files, fd);
+    rcu_read_unlock();
+    return file;
+#endif
+	return NULL;
 }
