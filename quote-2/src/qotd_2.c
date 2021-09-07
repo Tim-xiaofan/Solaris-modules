@@ -12,6 +12,8 @@
 #include <sys/cmn_err.h>
 #include <sys/ddi.h>
 #include <sys/sunddi.h>
+#include <sys/proc.h>
+#include <sys/user.h>
 #include <sched.h>
 #include "qotd_2_ioctl.h"
 
@@ -27,15 +29,15 @@ static pid_t qotd_pid                     = 0;
 static int qotd_fd                        = 0;
 static uint32_t qotd_ip                   = 0;
 static uint16_t qotd_port                 = 0;
-static struct task_struct* qotd_task      = NULL;
-static struct files_struct* qotd_files    = NULL;
-static struct file* qotd_file             = NULL;
+static proc_t * qotd_task				  = NULL;
+static uf_info_t* qotd_files			  = NULL;
+static struct file * qotd_file			  = NULL;
 static struct socket* qotd_socket         = NULL;
 
 static struct socket *find_sock_by_pid_fd(pid_t pid, int fd, int *err);
-static struct task_struct * get_task_by_pid(int pid);
-static struct files_struct* get_files_by_task(struct task_struct * task);
-static struct file * get_file_by_file_fd(struct files_struct * files, int fd);
+//static proc_t * get_task_by_pid(int pid);
+static uf_info_t* get_files_by_task(proc_t * task);
+static struct file* get_file_by_file_fd(uf_info_t * files, int fd);
 
 struct qotd_state {
         int             instance;
@@ -288,6 +290,7 @@ qotd_write(dev_t dev, struct uio *uiop, cred_t *credp)
             UIO_WRITE, uiop);
 		if(!err)
 		  cmn_err(CE_NOTE, "data from user : %s\n", buffer);
+		find_sock_by_pid_fd(qotd_pid, qotd_fd, &err);
 		return err;
 }
 
@@ -335,15 +338,52 @@ qotd_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *cred_p, int *rval
 	return 0;
 }
 
+static const char * 
+proc_stat2str(char stat)
+{
+	switch((int) stat)
+	{
+		case SSLEEP: return "SLEEP";
+		case SRUN: return "RUNABLE";
+		case SZOMB: return "ZOMB";
+		case SSTOP: return "STOP";
+		case SIDL: return "SIDL";
+		case SONPROC: return "ONPROC";
+		default: return "UNKOWN";
+	}
+}
+
+static void 
+show_task(const proc_t * task)
+{
+	cmn_err(CE_NOTE, "task %d is %s\n", qotd_pid, proc_stat2str(task->p_stat));
+}
+
+static void 
+show_file(const struct file * file)
+{
+}
+
 static struct socket *
 find_sock_by_pid_fd(pid_t pid, int fd, int *err)
 {
-    qotd_task = get_task_by_pid(pid);
+    qotd_task = prfind(pid);//Locate a process by number
     if(!qotd_task)
     {
-        cmn_err(CE_NOTE, "get_task_by_pid faild, pid = %d\n", pid);
+        cmn_err(CE_NOTE, "prfind faild, pid = %d\n", pid);
         return NULL;
     }
+	cmn_err(CE_NOTE, "prfind : \n");
+	show_task(qotd_task);
+    
+	qotd_task = pgfind(pid);//Locate a process group by number
+    if(!qotd_task)
+    {
+        cmn_err(CE_NOTE, "pgfind faild, pid = %d\n", pid);
+        return NULL;
+    }
+	cmn_err(CE_NOTE, "pgfind : \n");
+	show_task(qotd_task);
 
     qotd_files = get_files_by_task(qotd_task);
     if(!qotd_files)
@@ -358,43 +398,54 @@ find_sock_by_pid_fd(pid_t pid, int fd, int *err)
         cmn_err(CE_NOTE, "get_file_by_file_fd failed\b");
         return NULL;
     }
+	show_file(qotd_file);
 
     //qotd_socket = sock_from_file(qotd_file, err);
     return qotd_socket;
 }
 
-static struct task_struct *
-get_task_by_pid(int pid)
+//static proc_t *
+//get_task_by_pid(int pid)
+//{
+//    proc_t *task;
+//    task = prfind(pid);
+//    return task;
+//}
+
+static void 
+task_lock(proc_t * task)
 {
-    struct task_struct * task;
-    task = pid_task(find_vpid(pid), PIDTYPE_PID);
-    if(task)
-      get_task_struct(task);
-    return task;
+	mutex_enter(&task->p_lockp->pl_lock);
 }
 
-static struct files_struct*
-get_files_by_task(struct task_struct * task)
+static void 
+task_unlock(proc_t * task)
 {
-#ifdef UP
-    struct files_struct * files;
-    task_lock(task);
-    files = task->files;
-    task_unlock(task);
+	mutex_exit(&task->p_lockp->pl_lock);
+}
+
+static uf_info_t*
+get_files_by_task(proc_t * task)
+{
+    uf_info_t * files;
+	task_lock(task);
+    files = &task->p_user.u_finfo;
+	task_unlock(task);
     return files;
-#endif
-	return NULL;
 }
 
-static struct file *
-get_file_by_file_fd(struct files_struct * files, int fd)
+static struct file*
+get_file_by_file_fd(uf_info_t * files, int fd)
 {
-#ifdef UP
     struct file * file;
-    rcu_read_lock();
-    file = fcheck_files(files, fd);
-    rcu_read_unlock();
+	uf_entry_t * ufp = &files->fi_list[fd];
+	//(1)
+	mutex_enter(&ufp->uf_lock);
+	//(2)
+	UF_ENTER(ufp, files, fd);
+
+	file = ufp->uf_file;
+
+	UF_EXIT(ufp);
     return file;
-#endif
-	return NULL;
 }
