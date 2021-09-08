@@ -103,16 +103,16 @@ static struct modlinkage modlinkage = {
 int
 _init(void)
 {
-        int retval;
+        int retval = 0;
 		cmn_err(CE_NOTE, "qotd_t loading...\n");
 
-        if ((retval = ddi_soft_state_init(&qotd_state_head,
-            sizeof (struct qotd_state), 1)) != 0)
-                return retval;
-        if ((retval = mod_install(&modlinkage)) != 0) {
-                ddi_soft_state_fini(&qotd_state_head);
-                return (retval);
-        }
+        //if ((retval = ddi_soft_state_init(&qotd_state_head,
+        //    sizeof (struct qotd_state), 1)) != 0)
+        //        return retval;
+        //if ((retval = mod_install(&modlinkage)) != 0) {
+        //        ddi_soft_state_fini(&qotd_state_head);
+        //        return (retval);
+        //}
 
         return (retval);
 }
@@ -127,11 +127,11 @@ int
 _fini(void)
 {
 		cmn_err(CE_NOTE, "qotd_t unloading...\n");
-        int retval;
+        int retval = 0;
 
-        if ((retval = mod_remove(&modlinkage)) != 0)
-                return (retval);
-        ddi_soft_state_fini(&qotd_state_head);
+        //if ((retval = mod_remove(&modlinkage)) != 0)
+        //        return (retval);
+        //ddi_soft_state_fini(&qotd_state_head);
 
         return (retval);
 }
@@ -173,20 +173,20 @@ qotd_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
         case DDI_ATTACH:
                 if (ddi_soft_state_zalloc(qotd_state_head, instance)
                     != DDI_SUCCESS) {
-                        cmn_err(CE_WARN, "Unable to allocate state for %d",
+                        cmn_err(CE_WARN, "Unable to allocate state for %d\n",
                             instance);
                         return (DDI_FAILURE);
                 }
                 if ((qsp = ddi_get_soft_state(qotd_state_head, instance))
                     == NULL) {
-                        cmn_err(CE_WARN, "Unable to obtain state for %d",
+                        cmn_err(CE_WARN, "Unable to obtain state for %d\n",
                             instance);
                         ddi_soft_state_free(dip, instance);
                         return (DDI_FAILURE);
                 }
                 if (ddi_create_minor_node(dip, QOTD_NAME, S_IFCHR, instance,
                     DDI_PSEUDO, 0) != DDI_SUCCESS) {
-                        cmn_err(CE_WARN, "Cannot create minor node for %d",
+                        cmn_err(CE_WARN, "Cannot create minor node for %d\n",
                             instance);
                         ddi_soft_state_free(dip, instance);
                         ddi_remove_minor_node(dip, NULL);
@@ -195,10 +195,13 @@ qotd_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
                 qsp->instance = instance;
                 qsp->devi = dip;
                 ddi_report_dev(dip);
+				cmn_err(CE_NOTE, "DDI_ATTACH : attach success\n");
                 return (DDI_SUCCESS);
         case DDI_RESUME:
+				cmn_err(CE_NOTE, "DDI_RESUME : attach success\n");
                 return (DDI_SUCCESS);
         default:
+				cmn_err(CE_WARN, "UNKOWN : attach success\n");
                 return (DDI_FAILURE);
         }
 }
