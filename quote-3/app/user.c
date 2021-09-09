@@ -27,95 +27,134 @@ static int devfd                = -1;
 static void 
 signal_handle(int signum)
 {
-    if(signum == SIGINT)
-    {
-        printf("Preparing to quit...\n");
-        force_quit = true;
-    }
+	if(signum == SIGINT)
+	{
+		printf("Preparing to quit...\n");
+		force_quit = true;
+	}
+}
+
+static void
+get_size(const char *dev)
+{
+	size_t sz;
+	int fd;
+
+	if ((fd = open(dev, O_RDONLY)) < 0) {
+		perror("open");
+		exit(3);
+	}
+
+	if (ioctl(fd, QOTDIOCGSZ, &sz) < 0) {
+		perror("QOTDIOCGSZ");
+		exit(4);
+	}
+
+	(void) close(fd);
+
+	(void) printf("%zu\n", sz);
+}
+
+static void
+set_size(const char *dev, size_t sz)
+{
+	int fd;
+
+	if ((fd = open(dev, O_RDWR)) < 0) {
+		perror("open");
+		exit(3);
+	}
+
+	if (ioctl(fd, QOTDIOCSSZ, &sz) < 0) {
+		perror("QOTDIOCSSZ");
+		exit(4);
+	}
+
+	(void) close(fd);
 }
 
 static int 
 mod_config(void)
 {
-    pid_t pid;
-    int ret, tmpdevfd;
+	pid_t pid;
+	int ret, tmpdevfd;
 
-    //设置pid
-    pid = getpid();
-    ret = ioctl(devfd, QOTDIOCSPID, pid);
-    if(ret == -1)
-    {
-        perror("ioctl QOTDIOCSPID");
-        return -1;
-    }
+	//设置pid
+	pid = getpid();
+	ret = ioctl(devfd, QOTDIOCSPID, &pid);
+	if(ret == -1)
+	{
+		perror("ioctl QOTDIOCSPID");
+		return -1;
+	}
 
-    //�read pid
-    ret = ioctl(devfd, QOTDIOCGPID, &pid);
-    if(ret == -1)
-    {
-        perror("ioctl QOTDIOCGPID");
-        return -1;
-    }
-    printf("read pid : %d\n", pid);
+	//read pid
+	ret = ioctl(devfd, QOTDIOCGPID, &pid);
+	if(ret == -1)
+	{
+		perror("ioctl QOTDIOCGPID");
+		return -1;
+	}
+	printf("read pid : %d\n", pid);
 
-    //设置sockfd
-    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if(socket < 0)
-    {
-        perror("socket");
-        return -1;
-    }
-    ret = ioctl(devfd, QOTDIOCSFD, sockfd);
-    if(ret == -1)
-    {
-        perror("ioctl QOTDIOCFD");
-        return -1;
-    }
+	//设置sockfd
+	sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+	if(socket < 0)
+	{
+		perror("socket");
+		return -1;
+	}
+	ret = ioctl(devfd, QOTDIOCSFD, &sockfd);
+	if(ret == -1)
+	{
+		perror("ioctl QOTDIOCFD");
+		return -1;
+	}
 
-    //read �sockfd
-    ret = ioctl(devfd, QOTDIOCGFD, &tmpdevfd);
-    if(ret == -1)
-    {
-        perror("ioctl QOTDIOCGFD");
-        return -1;
-    }
-    printf("read sockfd : %d\n", tmpdevfd);
+	//read �sockfd
+	ret = ioctl(devfd, QOTDIOCGFD, &tmpdevfd);
+	if(ret == -1)
+	{
+		perror("ioctl QOTDIOCGFD");
+		return -1;
+	}
+	printf("read sockfd : %d\n", tmpdevfd);
 
-    //设置IP
-    uint32_t ip = inet_addr(IP);
-    struct in_addr in;
-    ret = ioctl(devfd, QOTDIOCSIP, ip);
-    if(ret == -1)
-    {
-        perror("ioctl QOTDIOCSIP");
-        return -1;
-    }
-    
-    ret = ioctl(devfd, QOTDIOCGIP, &ip);
-    if(ret == -1)
-    {
-        perror("ioctl QOTDIOCGIP");
-        return -1;
-    }
-    in.s_addr = ip;
-    printf("read ip : %s\n", inet_ntoa(in));
-    //set port
-    uint16_t port = htons(PORT); 
-    ret = ioctl(devfd, QOTDIOCSPORT, port);
-    if(ret == -1)
-    {
-        perror("ioctl QOTDIOCSPORT");
-        return -1;
-    }
-    
-    ret = ioctl(devfd, QOTDIOCGPORT, &port);
-    if(ret == -1)
-    {
-        perror("ioctl QOTDIOCGPORT");
-        return -1;
-    }
-    printf("read port : %u\n", ntohs(port));
-    return 0;
+	//设置IP
+	uint32_t ip = inet_addr(IP);
+	struct in_addr in;
+	ret = ioctl(devfd, QOTDIOCSIP, &ip);
+	if(ret == -1)
+	{
+		perror("ioctl QOTDIOCSIP");
+		return -1;
+	}
+
+	ret = ioctl(devfd, QOTDIOCGIP, &ip);
+	if(ret == -1)
+	{
+		perror("ioctl QOTDIOCGIP");
+		return -1;
+	}
+	in.s_addr = ip;
+	printf("read ip : %s\n", inet_ntoa(in));
+	//set port
+	uint16_t port = htons(PORT); 
+	ret = ioctl(devfd, QOTDIOCSPORT, &port);
+	if(ret == -1)
+	{
+		perror("ioctl QOTDIOCSPORT");
+		return -1;
+	}
+
+	ret = ioctl(devfd, QOTDIOCGPORT, &port);
+	if(ret == -1)
+	{
+		perror("ioctl QOTDIOCGPORT");
+		return -1;
+	}
+	printf("read port : %u\n", ntohs(port));
+	return 0;
 }
 
 static void
@@ -138,61 +177,62 @@ reset_dev(const char *dev)
 
 int main(int ac, char *av[])
 {
-    int ret;
-    time_t tm;
+	int ret;
+	time_t tm;
 
-    if(ac < 2)
-    {
-        printf("Usage : ./program devfile\n");
-        return -1;
-    }
+	if(ac < 2)
+	{
+		printf("Usage : ./program devfile\n");
+		return -1;
+	}
 
-    signal(SIGINT, signal_handle);
+	signal(SIGINT, signal_handle);
 
-    devfile = av[1];
-    printf("devfile = %s\n", devfile);
-    devfd = open(devfile, O_RDWR);
-    if(devfd < 0)
-    {
-        perror("open");
-        exit(errno);
-    }
+	devfile = av[1];
+	printf("devfile = %s\n", devfile);
+	devfd = open(devfile, O_RDWR);
+	if(devfd < 0)
+	{
+		perror("open");
+		exit(errno);
+	}
 
-    //config mod
-    if(mod_config() == -1)
-    {
-        fprintf(stderr, "mod_config failed\n");
-        close(devfd);
-        close(sockfd);
-        exit(EXIT_FAILURE);
-    }
+	get_size(devfile);
+	set_size(devfile, 1500);
 
-    while(!force_quit)
-    {
-        tm = time(NULL);
-        sprintf(buf, "%s", ctime(&tm));
-        ret = write(devfd, buf, strlen(buf) + 1);
-        if(ret < 0){
+	//config mod
+	if(mod_config() == -1)
+	{
+		fprintf(stderr, "mod_config failed\n");
+		goto done;
+	}
+
+	while(!force_quit)
+	{
+		tm = time(NULL);
+		sprintf(buf, "%s", ctime(&tm));
+		ret = write(devfd, buf, strlen(buf) + 1);
+		if(ret < 0){
 			fprintf(stderr, "ret = %d\n", ret);
-            perror("write");
-            break;
-        }
-        sleep(1);
-    }
+			perror("write");
+			break;
+		}
+		sleep(1);
+	}
 
-    ret = read(devfd, buf, BUF_SIZE);
-    if(ret < 0){
-        perror("read");
-    }
-    else
-    {
-        printf("data from kernel : %s\n",buf);
-    }
+	ret = read(devfd, buf, BUF_SIZE);
+	if(ret < 0){
+		perror("read");
+	}
+	else
+	{
+		printf("data from kernel : %s\n",buf);
+	}
 
+done:
 	reset_dev(devfile);
-    
-    close(devfd);
-    close(sockfd);
-    printf("done.\n");
-    return 0;
+	close(devfd);
+	close(sockfd);
+	printf("done.\n");
+	return 0;
 }

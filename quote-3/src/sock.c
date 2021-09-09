@@ -237,64 +237,65 @@ find_sock_by_fd(int fd, int * err, file_t ** fp)
 	return  so;
 }
 
-//static struct sockaddr *
-//copyin_name(struct sonode *so, struct sockaddr *name, socklen_t *namelenp,
-//			int *errorp)
-//{
-//	char    *faddr;
-//	size_t  namelen = (size_t)*namelenp;
-//
-//	ASSERT(namelen != 0);
-//	if (namelen > SO_MAXARGSIZE) {
-//		*errorp = EINVAL;
-//		eprintsoline(so, *errorp);
-//		cmn_err(CE_WARN, "copyin_name: namelen = %ld > SO_MAXARGSIZE = %d",
-//					namelen, SO_MAXARGSIZE);
-//		return (NULL);
-//	}
-//
-//	faddr = (char *)kmem_alloc(namelen, KM_SLEEP);
-//	if (copyin(name, faddr, namelen)) {
-//		kmem_free(faddr, namelen);
-//		*errorp = EFAULT;
-//		eprintsoline(so, *errorp);
-//		cmn_err(CE_WARN, "copyin_name : copyin failed");
-//		return (NULL);
-//	}
-//
-//	/*
-//	 * Add space for NULL termination if needed.
-//	 * Do a quick check if the last byte is NUL.
-//	 */
-//	if (so->so_family == AF_UNIX && faddr[namelen - 1] != '\0') {
-//		/* Check if there is any NULL termination */
-//		size_t  i;
-//		int foundnull = 0;
-//
-//		for (i = sizeof (name->sa_family); i < namelen; i++) {
-//			if (faddr[i] == '\0') {
-//				foundnull = 1;
-//				break;
-//			}
-//		}
-//		if (!foundnull) {
-//			/* Add extra byte for NUL padding */
-//			char *nfaddr;
-//
-//			nfaddr = (char *)kmem_alloc(namelen + 1, KM_SLEEP);
-//			bcopy(faddr, nfaddr, namelen);
-//			kmem_free(faddr, namelen);
-//
-//			/* NUL terminate */
-//			nfaddr[namelen] = '\0';
-//			namelen++;
-//			ASSERT((socklen_t)namelen == namelen);
-//			*namelenp = (socklen_t)namelen;
-//			faddr = nfaddr;
-//		}
-//	}
-//	return ((struct sockaddr *)faddr);
-//}
+static struct sockaddr *
+copyin_name(struct sonode *so, struct sockaddr *name, socklen_t *namelenp,
+			int *errorp)
+{
+	char    *faddr;
+	size_t  namelen = (size_t)*namelenp;
+
+	cmn_err(CE_NOTE, "copyin_name : name = %p, namelen = %ld\n", name, namelen);
+	ASSERT(namelen != 0);
+	if (namelen > SO_MAXARGSIZE) {
+		*errorp = EINVAL;
+		eprintsoline(so, *errorp);
+		cmn_err(CE_WARN, "copyin_name: namelen = %ld > SO_MAXARGSIZE = %d",
+					namelen, SO_MAXARGSIZE);
+		return (NULL);
+	}
+
+	faddr = (char *)kmem_alloc(namelen, KM_SLEEP);
+	if (ddi_copyin(name, faddr, namelen, FKIOCTL)) {
+		kmem_free(faddr, namelen);
+		*errorp = EFAULT;
+		eprintsoline(so, *errorp);
+		cmn_err(CE_WARN, "copyin_name : ddi_copyin failed");
+		return (NULL);
+	}
+
+	/*
+	 * Add space for NULL termination if needed.
+	 * Do a quick check if the last byte is NUL.
+	 */
+	if (so->so_family == AF_UNIX && faddr[namelen - 1] != '\0') {
+		/* Check if there is any NULL termination */
+		size_t  i;
+		int foundnull = 0;
+
+		for (i = sizeof (name->sa_family); i < namelen; i++) {
+			if (faddr[i] == '\0') {
+				foundnull = 1;
+				break;
+			}
+		}
+		if (!foundnull) {
+			/* Add extra byte for NUL padding */
+			char *nfaddr;
+
+			nfaddr = (char *)kmem_alloc(namelen + 1, KM_SLEEP);
+			bcopy(faddr, nfaddr, namelen);
+			kmem_free(faddr, namelen);
+
+			/* NUL terminate */
+			nfaddr[namelen] = '\0';
+			namelen++;
+			ASSERT((socklen_t)namelen == namelen);
+			*namelenp = (socklen_t)namelen;
+			faddr = nfaddr;
+		}
+	}
+	return ((struct sockaddr *)faddr);
+}
 
 static int
 sock_sendmsg(struct sonode *so, struct nmsghdr *msg, struct uio *uiop,
@@ -329,9 +330,9 @@ sock_sendmsg(struct sonode *so, struct nmsghdr *msg, struct uio *uiop,
 			  tsignal(curthread, SIGPIPE);
 			break;
 	}
-	cmn_err(CE_NOTE, "old = %ld, new = %ld\n",
+	cmn_err(CE_NOTE, "sock_sendmsg : old = %ld, new = %ld\n",
 				orig_resid, uiop->uio_resid);
-	cmn_err(CE_NOTE, "error = %d\n", error);
+	cmn_err(CE_NOTE, "sock_sendmsg : error = %d\n", error);
 
 	return (error);
 }
@@ -366,23 +367,23 @@ sock_send(int sock, struct nmsghdr *msg, struct uio * uiop, int flags)
 	/* Allocate and copyin name and control */
 	name = msg->msg_name;
 	namelen = msg->msg_namelen;
-	//if (name != NULL && namelen != 0) {
-	//	ASSERT(MUTEX_NOT_HELD(&so->so_lock));
-	//	name = copyin_name(so,
-	//				(struct sockaddr *)name,
-	//				&namelen, &error);
-	//	if (name == NULL)
-	//	{
-	//		cmn_err(CE_WARN, "copyin_name failed\n");
-	//		goto done3;
-	//	}
-	//	/* copyin_name null terminates addresses for AF_UNIX */
-	//	msg->msg_namelen = namelen;
-	//	msg->msg_name = name;
-	//} else {
-	//	msg->msg_name = name = NULL;
-	//	msg->msg_namelen = namelen = 0;
-	//}
+	if (name != NULL && namelen != 0) {
+		ASSERT(MUTEX_NOT_HELD(&so->so_lock));
+		name = copyin_name(so,
+					(struct sockaddr *)name,
+					&namelen, &error);
+		if (name == NULL)
+		{
+			cmn_err(CE_WARN, "copyin_name failed\n");
+			goto done3;
+		}
+		/* copyin_name null terminates addresses for AF_UNIX */
+		msg->msg_namelen = namelen;
+		msg->msg_name = name;
+	} else {
+		msg->msg_name = name = NULL;
+		msg->msg_namelen = namelen = 0;
+	}
 
 	control = msg->msg_control;
 	controllen = msg->msg_controllen;
@@ -418,12 +419,13 @@ done1:
 done2:
 	if (name != NULL)
 	  kmem_free(name, namelen);
-//done3:
+done3:
 	if (error != 0) {
 		releasef(sock);
 		return (set_errno(error));
 	}
 	lwp_stat_update(LWP_STAT_MSGSND, 1);
 	releasef(sock);
+	cmn_err(CE_NOTE, "sock_send : len = %ld, uio_resid = %ld\n", len, uiop->uio_resid);
 	return (len - uiop->uio_resid);
 }

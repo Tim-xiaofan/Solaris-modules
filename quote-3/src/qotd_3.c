@@ -47,19 +47,23 @@
 static char init_qotd[] = "On the whole, I'd rather be in Philadelphia. - W. C. Fields\n";
 static const size_t init_qotd_len = 128;
 
-#define QOTD_MAX_LEN    65536           /* Maximum quote in bytes */
-#define QOTD_CHANGED    0x1             /* User has made modifications */
-#define QOTD_DIDMINOR   0x2             /* Created minors */
-#define QOTD_DIDALLOC   0x4             /* Allocated storage space */
-#define QOTD_DIDMUTEX   0x8             /* Created mutex */
-#define QOTD_DIDCV      0x10            /* Created cv */
-#define QOTD_BUSY       0x20            /* Device is busy */
+#define QOTD_MAX_LEN		65536           /* Maximum quote in bytes */
+#define QOTD_CHANGED    	0x1             /* User has made modifications */
+#define QOTD_DIDMINOR   	0x2             /* Created minors */
+#define QOTD_DIDALLOC   	0x4             /* Allocated storage space */
+#define QOTD_DIDMUTEX   	0x8             /* Created mutex */
+#define QOTD_DIDCV      	0x10            /* Created cv */
+#define QOTD_BUSY       	0x20            /* Device is busy */
+#define QOTD_PIDCHANGED 	0x40            /* PID has been changed */
+#define QOTD_FDCHANGED  	0x80            /* sockfd has been changed */
+#define QOTD_IPCHANGED		0x100            /* IP has been changed */
+#define QOTD_PORTCHANGED	0x200            /* port has been changed */
 
 static void *qotd_state_head	= NULL;
-static pid_t qotd_pid			= 0;
-static int qotd_sockfd              = 0;
-static uint32_t qotd_ip         = 0;
-static uint16_t qotd_port       = 0;
+//static pid_t qotd_pid			= 0;
+//static int qotd_sockfd              = 0;
+//static uint32_t qotd_ip         = 0;
+//static uint16_t qotd_port       = 0;
 
 struct qotd_state {
 	int             instance;
@@ -70,6 +74,10 @@ struct qotd_state {
 	size_t          qotd_len;
 	ddi_umem_cookie_t qotd_cookie;//used by the ddi_umem_free(9F) function to free the memory
 	int             flags;
+	pid_t			pid;
+	int				sockfd;
+	uint32_t		ip;
+	uint16_t		port;
 };
 
 static int qotd_getinfo(dev_info_t *, ddi_info_cmd_t, void *, void **);
@@ -184,7 +192,7 @@ qotd_getinfo(dev_info_t *dip, ddi_info_cmd_t cmd, void *arg, void **resultp)
 			  *resultp = NULL;
 			break;
 		case DDI_INFO_DEVT2INSTANCE:
-			*resultp = (void *)getminor((dev_t)arg);
+			*resultp = (void *)(intptr_t)getminor((dev_t)arg);
 			retval = DDI_SUCCESS;
 			break;
 	}
@@ -324,6 +332,7 @@ qotd_close(dev_t dev, int flag, int otyp, cred_t *credp)
 static int
 qotd_read(dev_t dev, struct uio *uiop, cred_t *credp)
 {
+	return 0;
 	return qotd_rw(dev, uiop, UIO_READ);
 }
 
@@ -343,25 +352,26 @@ qotd_rw(dev_t dev, struct uio *uiop, enum uio_rw rw)
 	struct sockaddr_in to;
 	struct nmsghdr lmsg;
 
-	/** packet message from user*/
-	cmn_err(CE_NOTE, "send message : qotd_sockfd = %d, len = %ld\n",
-				qotd_sockfd, len);
-	memset(&to, 0, sizeof(to));
-	to.sin_family = AF_INET;
-	to.sin_addr.s_addr = qotd_ip;
-	to.sin_port = qotd_port;
-
-	lmsg.msg_name = (char *)&to;
-	lmsg.msg_namelen = sizeof(to);
-	lmsg.msg_control = NULL;
-	return sock_send(qotd_sockfd, &lmsg, uiop, 0);
-
-	return 0;
-
 	if ((qsp = ddi_get_soft_state(qotd_state_head, instance)) == NULL)
 	  return (ENXIO);
 
 	ASSERT(qsp->instance == instance);
+	
+	/** packet message from user*/
+	cmn_err(CE_NOTE, "send message : qotd_sockfd = %d, len = %ld\n",
+				qsp->sockfd, len);
+	memset(&to, 0, sizeof(to));
+	to.sin_family = AF_INET;
+	to.sin_addr.s_addr = qsp->ip;
+	to.sin_port = qsp->port;
+
+	lmsg.msg_name = (char *)&to;
+	lmsg.msg_namelen = sizeof(to);
+	lmsg.msg_control = NULL;
+	return (len - sock_send(qsp->sockfd, &lmsg, uiop, 0));
+
+	return 0;
+
 
 	if (len == 0)
 	  return (0);
@@ -510,6 +520,7 @@ qotd_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 							 qsp->qotd_len = new_len;
 							 qsp->flags |= QOTD_CHANGED;
 							 mutex_exit(&qsp->lock);
+							 cmn_err(CE_NOTE, "set size : %ld\n", qsp->qotd_len);
 
 							 return (0);
 						 }
@@ -545,41 +556,388 @@ qotd_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 								 (void)strlcpy(qsp->qotd, init_qotd, init_qotd_len);
 								 qsp->flags &= ~QOTD_CHANGED;
 								 mutex_exit(&qsp->lock);
-
-								 return (0);
+								 break;
 							 }
 		case QOTDIOCSPID:
-							 qotd_pid = arg;
-							 cmn_err(CE_NOTE, "qotd ioctl set pid : %d\n", qotd_pid);
-							 break;
+							 {
+								 size_t new_pid;
+								 uint_t model;
+
+								 if (!(mode & FWRITE))
+								 {
+									 cmn_err(CE_WARN, "QOTDIOCSPID : mode not FWRITE\n");
+									 return (EACCES);
+								 }
+
+#ifdef _MULTI_DATAMODEL
+								 model = ddi_model_convert_from(mode & FMODELS);
+								 if(mode & FKIOCTL)
+								   cmn_err(CE_NOTE, "QOTDIOCSPID : kcpoy\n");
+								 else
+								   cmn_err(CE_NOTE, "QOTDIOCSPID : cpoyin\n");
+
+								 switch (model) {
+									 case DDI_MODEL_ILP32: {
+															   size32_t pid32;
+															   if (ddi_copyin((void *)arg, &pid32, sizeof(size32_t),
+																			   mode) != 0)
+															   {
+																   cmn_err(CE_WARN, "QOTDIOCSPID DDI_MODEL_ILP32 : ddi_copyin failed\n");
+																 return (EFAULT);
+															   }
+															   new_pid = (pid_t)pid32;
+															   break;
+														   }
+									 case DDI_MODEL_NONE:
+														   if (ddi_copyin((void *)arg, &new_pid, sizeof (size_t),
+																		   mode) != 0)
+														   {
+															   cmn_err(CE_WARN, "QOTDIOCSPID DDI_MODEL_NONE : ddi_copyin failed\n");
+															   return (EFAULT);
+														   }
+														   break;
+									 default:
+														   cmn_err(CE_WARN, "Invalid data model %d in ioctl\n",
+																	   model);
+														   return (ENOTSUP);
+								 }
+#else /* ! _MULTI_DATAMODEL */
+								 if (ddi_copyin((void *)arg, &new_pid, sizeof(pid_t),
+												 mode) != 0)
+								 {
+									 cmn_err(CE_WARN, "QOTDIOCSPID not _MULTI_DATAMODEL : ddi_copyin failed\n")
+								   return (EFAULT);
+								 }
+#endif /* _MULTI_DATAMODEL */
+
+								 if (new_pid <= 0)
+								 {
+									 cmn_err(CE_WARN, "invalid pid : %ld\n", new_pid);
+									 return (EINVAL);
+								 }
+
+								 mutex_enter(&qsp->lock);
+								 while (qsp->flags & QOTD_BUSY) {
+									 if (cv_wait_sig(&qsp->cv, &qsp->lock) == 0) {
+										 mutex_exit(&qsp->lock);
+										 cmn_err(CE_WARN, "EINTR\n");
+										 return (EINTR);
+									 }
+								 }
+								 qsp->pid = (pid_t) new_pid;
+								 qsp->flags |= QOTD_PIDCHANGED;
+								 mutex_exit(&qsp->lock);
+
+								 cmn_err(CE_NOTE, "qotd ioctl set pid to : %d\n", qsp->pid);
+								 break;
+							 }
 		case QOTDIOCGPID:
-							 *(pid_t *)arg  = qotd_pid;
-							 cmn_err(CE_NOTE, "qotd ioctl get pid : %d\n", qotd_pid);
-							 break;
+							 {
+								 /* We are not guaranteed that ddi_copyout(9F) will read
+								  * automatically anything larger than a byte.  Therefore we
+								  * must duplicate the pid before copying it out to the user.
+								  */
+								 pid_t pid = qsp->pid;
+
+								 if (!(mode & FREAD))
+								   return (EACCES);
+
+#ifdef _MULTI_DATAMODEL
+								 switch (ddi_model_convert_from(mode & FMODELS)) {
+									 case DDI_MODEL_ILP32: {
+															   size32_t pid32 = (size32_t)pid;
+															   if (ddi_copyout(&pid32, (void *)arg, sizeof(size32_t),
+																			   mode) != 0)
+																 return (EFAULT);
+															   return (0);
+														   }
+									 case DDI_MODEL_NONE:
+														   if (ddi_copyout(&pid, (void *)arg, sizeof (pid_t),
+																		   mode) != 0)
+															 return (EFAULT);
+														   return (0);
+									 default:
+														   cmn_err(CE_WARN, "Invalid data model %d in ioctl\n",
+																	   ddi_model_convert_from(mode & FMODELS));
+														   return (ENOTSUP);
+								 }
+#else /* ! _MULTI_DATAMODEL */
+								 if (ddi_copyout(&pid, (void *)arg, sizeof (size_t), mode) != 0)
+								   return (EFAULT);
+#endif
+								 cmn_err(CE_NOTE, "qotd ioctl get pid : %d\n", qsp->pid);
+								 break;
+							 }
 		case QOTDIOCSFD:
-							 qotd_sockfd = arg;
-							 cmn_err(CE_NOTE, "qotd ioctl set fd : %d\n", qotd_sockfd);
-							 break;
+							 {
+								 int new_fd;
+								 uint_t model;
+
+								 if (!(mode & FWRITE))
+								   return (EACCES);
+
+#ifdef _MULTI_DATAMODEL
+								 model = ddi_model_convert_from(mode & FMODELS);
+
+								 switch (model) {
+									 case DDI_MODEL_ILP32: {
+															   size32_t fd32;
+															   if (ddi_copyin((void *)arg, &fd32, sizeof(size32_t),
+																			   mode) != 0)
+																 return (EFAULT);
+															   new_fd = (int)fd32;
+															   break;
+														   }
+									 case DDI_MODEL_NONE:
+														   if (ddi_copyin((void *)arg, &new_fd, sizeof(int),
+																		   mode) != 0)
+															 return (EFAULT);
+														   break;
+									 default:
+														   cmn_err(CE_WARN, "Invalid data model %d in ioctl\n",
+																	   model);
+														   return (ENOTSUP);
+								 }
+#else /* ! _MULTI_DATAMODEL */
+								 if (ddi_copyin((void *)arg, &new_fd, sizeof(int),
+												 mode) != 0)
+								   return (EFAULT);
+#endif /* _MULTI_DATAMODEL */
+
+								 if (new_fd <= 0)
+								   return (EINVAL);
+
+								 mutex_enter(&qsp->lock);
+								 while (qsp->flags & QOTD_BUSY) {
+									 if (cv_wait_sig(&qsp->cv, &qsp->lock) == 0) {
+										 mutex_exit(&qsp->lock);
+										 return (EINTR);
+									 }
+								 }
+								 qsp->sockfd = new_fd;
+								 qsp->flags |= QOTD_FDCHANGED;
+								 mutex_exit(&qsp->lock);
+
+								 cmn_err(CE_NOTE, "qotd ioctl set fd to : %d\n", qsp->sockfd);
+								 break;
+							 }
 		case QOTDIOCGFD:
-							 *(int *)arg = qotd_sockfd;
-							 cmn_err(CE_NOTE, "qotd ioctl get fd : %d\n", qotd_sockfd);
-							 break;
+							 {
+								 /* We are not guaranteed that ddi_copyout(9F) will read
+								  * automatically anything larger than a byte.  Therefore we
+								  * must duplicate the fd before copying it out to the user.
+								  */
+								 int fd = qsp->sockfd;
+
+								 if (!(mode & FREAD))
+								   return (EACCES);
+
+#ifdef _MULTI_DATAMODEL
+								 switch (ddi_model_convert_from(mode & FMODELS)) {
+									 case DDI_MODEL_ILP32: {
+															   size32_t fd32 = (size32_t)fd;
+															   if (ddi_copyout(&fd32, (void *)arg, sizeof(size32_t),
+																			   mode) != 0)
+																 return (EFAULT);
+															   return (0);
+														   }
+									 case DDI_MODEL_NONE:
+														   if (ddi_copyout(&fd, (void *)arg, sizeof (int),
+																		   mode) != 0)
+															 return (EFAULT);
+														   return (0);
+									 default:
+														   cmn_err(CE_WARN, "Invalid data model %d in ioctl\n",
+																	   ddi_model_convert_from(mode & FMODELS));
+														   return (ENOTSUP);
+								 }
+#else /* ! _MULTI_DATAMODEL */
+								 if (ddi_copyout(&fd, (void *)arg, sizeof (size_t), mode) != 0)
+								   return (EFAULT);
+#endif
+								 cmn_err(CE_NOTE, "qotd ioctl get fd : %d\n", qsp->sockfd);
+								 break;
+							 }
 		case QOTDIOCSIP:
-							 qotd_ip = arg;
-							 cmn_err(CE_NOTE, "qotd ioctl set ip : %08x\n", qotd_ip);
-							 break;
+							 {
+								 uint32_t new_ip;
+								 uint_t model;
+
+								 if (!(mode & FWRITE))
+								   return (EACCES);
+
+#ifdef _MULTI_DATAMODEL
+								 model = ddi_model_convert_from(mode & FMODELS);
+
+								 switch (model) {
+									 case DDI_MODEL_ILP32: {
+															   size32_t ip32;
+															   if (ddi_copyin((void *)arg, &ip32, sizeof(size32_t),
+																			   mode) != 0)
+																 return (EFAULT);
+															   new_ip = (uint32_t)ip32;
+															   break;
+														   }
+									 case DDI_MODEL_NONE:
+														   if (ddi_copyin((void *)arg, &new_ip, sizeof (uint32_t),
+																		   mode) != 0)
+															 return (EFAULT);
+														   break;
+									 default:
+														   cmn_err(CE_WARN, "Invalid data model %d in ioctl\n",
+																	   model);
+														   return (ENOTSUP);
+								 }
+#else /* ! _MULTI_DATAMODEL */
+								 if (ddi_copyin((void *)arg, &new_ip, sizeof(uint32_t),
+												 mode) != 0)
+								   return (EFAULT);
+#endif /* _MULTI_DATAMODEL */
+
+								 if (new_ip <= 0)
+								   return (EINVAL);
+
+								 mutex_enter(&qsp->lock);
+								 while (qsp->flags & QOTD_BUSY) {
+									 if (cv_wait_sig(&qsp->cv, &qsp->lock) == 0) {
+										 mutex_exit(&qsp->lock);
+										 return (EINTR);
+									 }
+								 }
+								 qsp->ip = new_ip;
+								 qsp->flags |= QOTD_IPCHANGED;
+								 mutex_exit(&qsp->lock);
+
+								 cmn_err(CE_NOTE, "qotd ioctl set ip to : %08x\n", qsp->ip);
+								 break;
+							 }
 		case QOTDIOCGIP:
-							 *(uint32_t *)arg = qotd_ip;
-							 cmn_err(CE_NOTE, "qotd ioctl get ip : %08x\n", qotd_ip);
-							 break;
+							 {
+								 /* We are not guaranteed that ddi_copyout(9F) will read
+								  * automatically anything larger than a byte.  Therefore we
+								  * must duplicate the IP before copying it out to the user.
+								  */
+								 uint32_t ip = qsp->ip;
+
+								 if (!(mode & FREAD))
+								   return (EACCES);
+
+#ifdef _MULTI_DATAMODEL
+								 switch (ddi_model_convert_from(mode & FMODELS)) {
+									 case DDI_MODEL_ILP32: {
+															   size32_t ip32 = (size32_t)ip;
+															   if (ddi_copyout(&ip32, (void *)arg, sizeof(size32_t),
+																			   mode) != 0)
+																 return (EFAULT);
+															   return (0);
+														   }
+									 case DDI_MODEL_NONE:
+														   if (ddi_copyout(&ip, (void *)arg, sizeof (uint32_t),
+																		   mode) != 0)
+															 return (EFAULT);
+														   return (0);
+									 default:
+														   cmn_err(CE_WARN, "Invalid data model %d in ioctl\n",
+																	   ddi_model_convert_from(mode & FMODELS));
+														   return (ENOTSUP);
+								 }
+#else /* ! _MULTI_DATAMODEL */
+								 if (ddi_copyout(&ip, (void *)arg, sizeof (size_t), mode) != 0)
+								   return (EFAULT);
+#endif
+								 cmn_err(CE_NOTE, "qotd ioctl get ip : %d\n", qsp->ip);
+								 break;
+							 }
 		case QOTDIOCSPORT:
-							 qotd_port = arg;
-							 cmn_err(CE_NOTE, "qotd ioctl set port : %04x\n", qotd_port);
-							 break;
+							 {
+								 uint16_t new_port;
+								 uint_t model;
+
+								 if (!(mode & FWRITE))
+								   return (EACCES);
+
+#ifdef _MULTI_DATAMODEL
+								 model = ddi_model_convert_from(mode & FMODELS);
+
+								 switch (model) {
+									 case DDI_MODEL_ILP32: {
+															   size32_t port32;
+															   if (ddi_copyin((void *)arg, &port32, sizeof(size32_t),
+																			   mode) != 0)
+																 return (EFAULT);
+															   new_port = (uint16_t)port32;
+															   break;
+														   }
+									 case DDI_MODEL_NONE:
+														   if (ddi_copyin((void *)arg, &new_port, sizeof (uint16_t),
+																		   mode) != 0)
+															 return (EFAULT);
+														   break;
+									 default:
+														   cmn_err(CE_WARN, "Invalid data model %d in ioctl\n",
+																	   model);
+														   return (ENOTSUP);
+								 }
+#else /* ! _MULTI_DATAMODEL */
+								 if (ddi_copyin((void *)arg, &new_port, sizeof(uint16_t),
+												 mode) != 0)
+								   return (EFAULT);
+#endif /* _MULTI_DATAMODEL */
+
+								 if (new_port <= 0)
+								   return (EINVAL);
+
+								 mutex_enter(&qsp->lock);
+								 while (qsp->flags & QOTD_BUSY) {
+									 if (cv_wait_sig(&qsp->cv, &qsp->lock) == 0) {
+										 mutex_exit(&qsp->lock);
+										 return (EINTR);
+									 }
+								 }
+								 qsp->port = new_port;
+								 qsp->flags |= QOTD_PORTCHANGED;
+								 mutex_exit(&qsp->lock);
+
+								 cmn_err(CE_NOTE, "qotd ioctl set port to : %04x\n", qsp->port);
+								 break;
+							 }
 		case QOTDIOCGPORT:
-							 *(uint16_t *)arg = qotd_port;
-							 cmn_err(CE_NOTE, "qotd ioctl get port : %04x\n", qotd_port);
-							 break;
+							 {
+								 /* We are not guaranteed that ddi_copyout(9F) will read
+								  * automatically anything larger than a byte.  Therefore we
+								  * must duplicate the port before copying it out to the user.
+								  */
+								 uint16_t port = qsp->port;
+
+								 if (!(mode & FREAD))
+								   return (EACCES);
+
+#ifdef _MULTI_DATAMODEL
+								 switch (ddi_model_convert_from(mode & FMODELS)) {
+									 case DDI_MODEL_ILP32: {
+															   size32_t port32 = (size32_t)port;
+															   if (ddi_copyout(&port32, (void *)arg, sizeof(size32_t),
+																			   mode) != 0)
+																 return (EFAULT);
+															   return (0);
+														   }
+									 case DDI_MODEL_NONE:
+														   if (ddi_copyout(&port, (void *)arg, sizeof (uint16_t),
+																		   mode) != 0)
+															 return (EFAULT);
+														   return (0);
+									 default:
+														   cmn_err(CE_WARN, "Invalid data model %d in ioctl\n",
+																	   ddi_model_convert_from(mode & FMODELS));
+														   return (ENOTSUP);
+								 }
+#else /* ! _MULTI_DATAMODEL */
+								 if (ddi_copyout(&port, (void *)arg, sizeof (size_t), mode) != 0)
+								   return (EFAULT);
+#endif
+								 cmn_err(CE_NOTE, "qotd ioctl get port : %d\n", qsp->port);
+								 break;
+							 }
 		default:
 							 cmn_err(CE_NOTE, "qotd ioctl invalid cmd : %d", cmd);
 							 return (ENOTTY);
