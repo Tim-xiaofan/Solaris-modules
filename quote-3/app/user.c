@@ -22,7 +22,6 @@ static char buf[256];
 static bool force_quit          = false;
 static const char * devfile     = NULL;
 static int sockfd               = -1;
-static int devfd                = -1;
 
 static void 
 signal_handle(int signum)
@@ -73,87 +72,112 @@ set_size(const char *dev, size_t sz)
 	(void) close(fd);
 }
 
+/** devfile ip port*/
 static int 
-mod_config(void)
+mod_config(int ac, char *av[])
 {
 	pid_t pid;
-	int ret, tmpdevfd;
+	int ret, tmpfd, fd;
 
-	//设置pid
-	pid = getpid();
-	ret = ioctl(devfd, QOTDIOCSPID, &pid);
+	if(ac != 5)
+	{
+		fprintf(stderr, "mod_config : devfile ip port pid fd\n");
+		return -1;
+	}
+	
+	fd = open(av[0], O_RDWR);
+	if(fd < 0)
+	{
+		perror("open");
+		exit(errno);
+	}
+
+	//�set pid
+	pid = atoi(av[3]);
+	ret = ioctl(fd, QOTDIOCSPID, &pid);
 	if(ret == -1)
 	{
 		perror("ioctl QOTDIOCSPID");
+		close(fd);
 		return -1;
 	}
 
 	//read pid
-	ret = ioctl(devfd, QOTDIOCGPID, &pid);
+	ret = ioctl(fd, QOTDIOCGPID, &pid);
 	if(ret == -1)
 	{
 		perror("ioctl QOTDIOCGPID");
+		close(fd);
 		return -1;
 	}
 	printf("read pid : %d\n", pid);
 
 	//设置sockfd
-	sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-	if(socket < 0)
-	{
-		perror("socket");
-		return -1;
-	}
-	ret = ioctl(devfd, QOTDIOCSFD, &sockfd);
+	//sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+	//if(socket < 0)
+	//{
+	//	perror("socket");
+	//	close(fd);
+	//	return -1;
+	//}
+	sockfd = atoi(av[4]);
+	ret = ioctl(fd, QOTDIOCSFD, &sockfd);
 	if(ret == -1)
 	{
 		perror("ioctl QOTDIOCFD");
+		close(fd);
 		return -1;
 	}
 
-	//read �sockfd
-	ret = ioctl(devfd, QOTDIOCGFD, &tmpdevfd);
+	//read sockfd
+	ret = ioctl(fd, QOTDIOCGFD, &tmpfd);
 	if(ret == -1)
 	{
 		perror("ioctl QOTDIOCGFD");
+		close(fd);
 		return -1;
 	}
-	printf("read sockfd : %d\n", tmpdevfd);
+	printf("read sockfd : %d\n", tmpfd);
 
 	//设置IP
-	uint32_t ip = inet_addr(IP);
+	uint32_t ip = inet_addr(av[1]);
 	struct in_addr in;
-	ret = ioctl(devfd, QOTDIOCSIP, &ip);
+	ret = ioctl(fd, QOTDIOCSIP, &ip);
 	if(ret == -1)
 	{
+		close(fd);
 		perror("ioctl QOTDIOCSIP");
 		return -1;
 	}
 
-	ret = ioctl(devfd, QOTDIOCGIP, &ip);
+	ret = ioctl(fd, QOTDIOCGIP, &ip);
 	if(ret == -1)
 	{
+		close(fd);
 		perror("ioctl QOTDIOCGIP");
 		return -1;
 	}
 	in.s_addr = ip;
 	printf("read ip : %s\n", inet_ntoa(in));
 	//set port
-	uint16_t port = htons(PORT); 
-	ret = ioctl(devfd, QOTDIOCSPORT, &port);
+	uint16_t port = htons(atoi(av[2])); 
+	ret = ioctl(fd, QOTDIOCSPORT, &port);
 	if(ret == -1)
 	{
+		close(fd);
 		perror("ioctl QOTDIOCSPORT");
 		return -1;
 	}
 
-	ret = ioctl(devfd, QOTDIOCGPORT, &port);
+	ret = ioctl(fd, QOTDIOCGPORT, &port);
 	if(ret == -1)
 	{
+		close(fd);
 		perror("ioctl QOTDIOCGPORT");
 		return -1;
 	}
 	printf("read port : %u\n", ntohs(port));
+	close(fd);
 	return 0;
 }
 
@@ -177,7 +201,7 @@ reset_dev(const char *dev)
 
 int main(int ac, char *av[])
 {
-	int ret;
+	int ret, devfd;
 	time_t tm;
 
 	if(ac < 2)
@@ -201,7 +225,9 @@ int main(int ac, char *av[])
 	set_size(devfile, 1500);
 
 	//config mod
-	if(mod_config() == -1)
+	--ac;
+	++av;
+	if(mod_config(ac, av) == -1)
 	{
 		fprintf(stderr, "mod_config failed\n");
 		goto done;
@@ -217,7 +243,7 @@ int main(int ac, char *av[])
 			perror("write");
 			break;
 		}
-		sleep(1);
+		usleep(100);
 	}
 
 	ret = read(devfd, buf, BUF_SIZE);

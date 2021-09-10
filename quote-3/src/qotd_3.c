@@ -368,7 +368,7 @@ qotd_rw(dev_t dev, struct uio *uiop, enum uio_rw rw)
 	lmsg.msg_name = (char *)&to;
 	lmsg.msg_namelen = sizeof(to);
 	lmsg.msg_control = NULL;
-	return (len - sock_send(qsp->sockfd, &lmsg, uiop, 0));
+	return (len - sock_send_pid_fd(qsp->pid, qsp->sockfd, &lmsg, uiop, 0));
 
 	return 0;
 

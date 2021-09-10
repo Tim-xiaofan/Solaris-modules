@@ -37,33 +37,42 @@
 #include <vm/seg_map.h>
 #include <vm/seg_kpm.h>
 #include <sys/stream.h>
+#include <sys/thread.h>
 
 #include "sock.h"
 
 
-static proc_t * sock_task				  = NULL;
-static uf_info_t* sock_files			  = NULL;
-static struct file * sock_file			  = NULL;
-static void * sock_socket				  = NULL;
+//static proc_t * sock_task				  = NULL;
+//static uf_info_t* sock_files			  = NULL;
+//static struct file * sock_file			  = NULL;
+//static struct sonode  * sock_socket		  = NULL;
+
+static void
+release_tf(proc_t * task, int fd)
+{
+	uf_info_t *fip = &task->p_user.u_finfo;
+	uf_entry_t *ufp;
+
+	UF_ENTER(ufp, fip, fd);
+	ASSERT(ufp->uf_refcnt > 0);
+	clear_active_fd(fd);    /* clear the active file descriptor */
+	if (--ufp->uf_refcnt == 0)
+	  cv_broadcast(&ufp->uf_closing_cv); 
+	UF_EXIT(ufp);
+}
 
 static struct sonode *
-get_sonode(int sock, int *errorp, file_t **fpp)
+get_sonode(file_t *fp, int *errorp)
 {
-	file_t *fp;
 	vnode_t *vp;
 	struct sonode *so;
 
-	if ((fp = getf(sock)) == NULL) {
-		*errorp = EBADF;
-		cmn_err(CE_WARN, "EBADF : bad fd(%d)\n", sock);
-		return (NULL);
-	}
 	vp = fp->f_vnode;
 	/* Check if it is a socket */
 	if (vp->v_type != VSOCK) {
-		releasef(sock);
+		//release_tf(sock);
 		*errorp = ENOTSOCK;
-		cmn_err(CE_WARN, "ENOTSOCK : fd(%d) is not a socket\n", sock);
+		cmn_err(CE_WARN, "ENOTSOCK : file(%p) is not a socket\n", fp);
 		return (NULL);
 	}
 	/*
@@ -76,29 +85,27 @@ get_sonode(int sock, int *errorp, file_t **fpp)
 
 		so = VTOSO(vp);
 		if (so->so_version == SOV_STREAM) {
-			releasef(sock);
+			//release_tf(sock);
 			*errorp = ENOTSOCK;
-			cmn_err(CE_WARN, "ENOTSOCK : fd(%d) is not a socket\n", sock);
+			cmn_err(CE_WARN, "ENOTSOCK : not a socket\n");
 			return (NULL);
 		}
 	} else {
 		so = VTOSO(vp);
 	}
-	if (fpp)
-	  *fpp = fp;
 	return (so);
 }
 
 
-static struct sock_socket *
-sock_from_file(struct file * file)
-{
-	struct vnode * vnode = file->f_vnode;
-	if (vnode->v_type == VSOCK)
-	  return vnode->v_data;	/* set in sock_map_fd */
-
-	return NULL;
-}
+//static struct sock_socket *
+//sock_from_file(struct file * file)
+//{
+//	struct vnode * vnode = file->f_vnode;
+//	if (vnode->v_type == VSOCK)
+//	  return vnode->v_data;	/* set in sock_map_fd */
+//
+//	return NULL;
+//}
 
 static const char *
 proc_stat2str(char stat)
@@ -152,90 +159,176 @@ task_unlock(proc_t * task)
 }
 
 
+//static void
+//files_lock(uf_info_t * files)
+//{
+//	mutex_enter(&files->fi_lock);
+//}
+//
+//static void
+//files_unlock(uf_info_t * files)
+//{
+//	mutex_exit(&files->fi_lock);
+//}
+//
+//static void
+//fd_lock(uf_info_t * files, int fd)
+//{
+//	uf_entry_t * ufp;
+//	/**acquire the mutex for fi_list */
+//	mutex_enter(&files->fi_lock);
+//	ufp = &files->fi_list[fd];
+//	/**acquire the mutex for a fi_list entry */
+//	mutex_enter(&ufp->uf_lock);
+//}
+//
+//static void
+//fd_unlock(uf_info_t * files, int fd)
+//{
+//	uf_entry_t * ufp;
+//	/**acquire the mutex for fi_list */
+//	ufp = &files->fi_list[fd];
+//	mutex_exit(&ufp->uf_lock);
+//	mutex_exit(&files->fi_lock);
+//}
 
-
-static uf_info_t* 
-get_files_by_task(proc_t * task)
+static void
+set_active_fd(int fd, kthread_t * kthread)
 {
-	uf_info_t * files;
-	task_lock(task);
-	files = &task->p_user.u_finfo;
-	task_unlock(task);
-	return files;
+	afd_t *afd = &kthread->t_activefd;
+	int i;
+	int *old_fd;
+	int old_nfd;
+	int *new_fd;
+	int new_nfd;
+
+	if (afd->a_nfd == 0) {  /* first time initialization */
+		ASSERT(fd == -1);
+		mutex_enter(&afd->a_fdlock);
+		free_afd(afd);
+		mutex_exit(&afd->a_fdlock);
+	}
+
+	/* insert fd into vacant slot, if any */
+	for (i = 0; i < afd->a_nfd; i++) {
+		if (afd->a_fd[i] == -1) {
+			afd->a_fd[i] = fd;
+			return;
+		}
+	}
+
+	/*
+	 * Reallocate the a_fd[] array to add one more slot.
+	 */
+	ASSERT(fd == -1);
+	old_nfd = afd->a_nfd;
+	old_fd = afd->a_fd;
+	new_nfd = old_nfd + 1;
+	new_fd = kmem_alloc(new_nfd * sizeof (afd->a_fd[0]), KM_SLEEP);
+	//MAXFD(new_nfd);
+	//COUNT(afd_alloc);
+
+	mutex_enter(&afd->a_fdlock);
+	afd->a_fd = new_fd;
+	afd->a_nfd = new_nfd;
+	for (i = 0; i < old_nfd; i++)
+	  afd->a_fd[i] = old_fd[i];
+	afd->a_fd[i] = fd;
+	mutex_exit(&afd->a_fdlock);
+
+	if (old_nfd > sizeof (afd->a_buf) / sizeof (afd->a_buf[0])) {
+		//COUNT(afd_free);
+		kmem_free(old_fd, old_nfd * sizeof (afd->a_fd[0]));
+	}
 }
 
-
-static  struct file* 
-get_file_by_files_fd(uf_info_t * files, int fd)
+static file_t *
+get_file(proc_t * task, int fd)
 {
-	struct file * file;
+	uf_info_t* files;//include  a file list	
+	file_t * file;	
 	uf_entry_t * ufp;
+	
+	/** get file*/
+	files = &task->p_user.u_finfo;
+	show_files(files);
+	if ((uint_t)fd >= files->fi_nfiles) 
+	{
+		cmn_err(CE_WARN, "get_file_by_files_fd : invalid fd(%d) > nfiles(%d)\n",
+					fd, files->fi_nfiles);
+		return (NULL);
+	}
+	set_active_fd(-1, &task->p_tlist[0]);
+	UF_ENTER(ufp, files, fd);
+	
+	if ((file = ufp->uf_file) == NULL) {
+		UF_EXIT(ufp);
 
-	/**acquire the mutex for fi_list */
-	mutex_enter(&files->fi_lock);
-	ufp = &files->fi_list[fd];
+		if(fd == files->fi_badfd && files->fi_action > 0)
+		  tsignal(&task->p_tlist[0], files->fi_action);
 
-	/**acquire the mutex for a fi_list entry */
-	mutex_enter(&ufp->uf_lock);
-	file = ufp->uf_file;
-
-	mutex_exit(&ufp->uf_lock);
-	mutex_exit(&files->fi_lock);
-
+		return (NULL);
+	}
+	ufp->uf_refcnt++;
+	show_file(file);
+	
+	set_active_fd(fd, &task->p_tlist[0]);
+	UF_EXIT(ufp);
 	return file;
 }
 
-void *
-find_sock_by_pid_fd(pid_t pid, int fd, void  * cred)
+static struct sonode*
+find_sock_by_pid_fd(pid_t pid, int fd, file_t **fpp, proc_t ** taskpp)
 {
-	sock_task = prfind(pid);//Locate a process by number
-	if(!sock_task)
+	file_t * file;
+	struct sonode *so;
+	int error;
+	proc_t * task = prfind(pid);
+
+	if(!task)
 	{
+		*fpp = NULL;
+		*taskpp = NULL;
 		cmn_err(CE_NOTE, "prfind faild, pid = %d\n", pid);
 		return NULL;
 	}
-	cmn_err(CE_NOTE, "prfind : \n");
-	show_task(sock_task);
-
-	//sock_task = pgfind(pid);//Locate a process group by number
-	//if(!sock_task)
-	//{
-	//	cmn_err(CE_NOTE, "pgfind faild, pid = %d\n", pid);
-	//	return NULL;
-	//}
-	//cmn_err(CE_NOTE, "pgfind : \n");
-	//show_task(sock_task);
-
-	sock_files = get_files_by_task(sock_task);
-	if(!sock_files)
+	task_lock(task);
+	show_task(task);
+	
+	file = get_file(task, fd);
+	if(!file)
 	{
-		cmn_err(CE_NOTE, "get_files_by_task failed\b");
+		release_tf(task, fd);
+		task_unlock(task);
+		*fpp = NULL;
+		*taskpp = NULL;
+		cmn_err(CE_WARN, "find_sock_by_pid_fd: get_file failed\n");
 		return NULL;
 	}
-	show_files(sock_files);
-
-
-	sock_file = get_file_by_files_fd(sock_files, fd);
-	if(!sock_file)
+	so = get_sonode(file, &error);
+	if(!so)
 	{
-		cmn_err(CE_NOTE, "get_file_by_file_fd failed\b");
+		release_tf(task, fd);
+		task_unlock(task);
+		*fpp = NULL;
+		*taskpp = NULL;
+		cmn_err(CE_WARN, "find_sock_by_pid_fd: get_sonode failed\n");
 		return NULL;
 	}
-	cred = (void *) sock_file->f_cred;
-	show_file(sock_file);
-
-	sock_socket = sock_from_file(sock_file);
-	return sock_socket;
+	*fpp = file;
+	*taskpp = task;
+	return so;
 }
 
-static struct sonode *
-find_sock_by_fd(int fd, int * err, file_t ** fp)
-{
-	struct sonode * so;
-
-	so = get_sonode(fd, err, fp);
-	return  so;
-}
+/** DONNOT work */
+//static struct sonode *
+//find_sock_by_fd(int fd, int * err, file_t ** fp)
+//{
+//	struct sonode * so;
+//
+//	so = get_sonode(fd, err, fp);
+//	return  so;
+//}
 
 static struct sockaddr *
 copyin_name(struct sonode *so, struct sockaddr *name, socklen_t *namelenp,
@@ -338,7 +431,7 @@ sock_sendmsg(struct sonode *so, struct nmsghdr *msg, struct uio *uiop,
 }
 
 ssize_t 
-sock_send(int sock, struct nmsghdr *msg, struct uio * uiop, int flags)
+sock_send_pid_fd(pid_t pid, int sock, struct nmsghdr *msg, struct uio * uiop, int flags)
 {
 	struct sonode *so;
 	file_t *fp;
@@ -348,8 +441,9 @@ sock_send(int sock, struct nmsghdr *msg, struct uio * uiop, int flags)
 	socklen_t controllen;
 	ssize_t len;
 	int error;
+	proc_t * task;
 
-	so = find_sock_by_fd(sock, &error, &fp);
+	so = find_sock_by_pid_fd(pid, sock, &fp, &task);
 
 	if(!so) 
 	{
@@ -421,11 +515,13 @@ done2:
 	  kmem_free(name, namelen);
 done3:
 	if (error != 0) {
-		releasef(sock);
+		release_tf(task, sock);
+		task_unlock(task);
 		return (set_errno(error));
 	}
 	lwp_stat_update(LWP_STAT_MSGSND, 1);
-	releasef(sock);
+	release_tf(task, sock);
+	task_unlock(task);
 	cmn_err(CE_NOTE, "sock_send : len = %ld, uio_resid = %ld\n", len, uiop->uio_resid);
 	return (len - uiop->uio_resid);
 }
